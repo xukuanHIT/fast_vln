@@ -26,7 +26,6 @@ from habitat_data import HabitatData, pose_habitat_to_tsdf, pos_habitat_to_norma
 from map import Map
 from map_elements import Keyframe, Object3D
 from tsdf_planner import TSDFPlanner, Frontier, SnapShot
-from query_vlm_aeqa import query_vlm_for_response
 from logger import Logger
 from visualization import Visualization, concat_images_opencv
 from vlm import VLM
