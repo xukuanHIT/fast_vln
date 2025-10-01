@@ -150,6 +150,7 @@ def filter_detections(
     top_x_detections=None,
     confidence_threshold: float = 0.0,
     min_area_ratio: float = 0.0001,  
+    target_claasses: set = set(),
     skip_bg: bool = True,  # Explicitly passing skip_bg
     BG_CLASSES: list = [],  # Explicitly passing BG_CLASSES
 ):
@@ -180,18 +181,18 @@ def filter_detections(
         # remove background objects
         conf, curr_xyxy, curr_class_id, curr_label = current_det
         if skip_bg and curr_label in BG_CLASSES:
-            print("filter {}, as it is bg class".format(curr_label))
+            # print("filter {}, as it is bg class".format(curr_label))
             continue
 
         # remove small objects
         curr_area = (curr_xyxy[2] - curr_xyxy[0]) * (curr_xyxy[3] - curr_xyxy[1])
         if curr_area < min_area_threshold:
-            print("filter {}, as it is too small".format(curr_label))
+            # print("filter {}, as it is too small".format(curr_label))
             continue
 
         # Check confidence threshold
-        if conf < confidence_threshold:
-            print("filter {}, as its low confidence. Its confidence: {}".format(curr_label, conf))
+        if conf < confidence_threshold and curr_label not in target_claasses:
+            # print("filter {}, as its low confidence. Its confidence: {}".format(curr_label, conf))
             continue
 
         keep_idx_list.append(idx)

@@ -18,7 +18,7 @@ from geom import *
 from habitat_data import pos_normal_to_habitat, pos_habitat_to_normal
 from tsdf_base import TSDFPlannerBase
 from utils import resize_image
-from map_elements import Frame, Keyframe
+from map_elements import Frame, Keyframe, Object3D
 from map import Map
 
 @dataclass
@@ -559,7 +559,7 @@ class TSDFPlanner(TSDFPlannerBase):
 
     def set_next_navigation_point(
         self,
-        choice: Union[Keyframe, Frontier], # 目标点
+        choice: Union[Keyframe, Frontier, Object3D], # 目标点
         pts,    # 当前位置
         scene: Map,
         cfg,
@@ -582,8 +582,65 @@ class TSDFPlanner(TSDFPlannerBase):
         cur_point = self.normal2voxel(pts)
         self.max_point = choice
 
+
+        if type(choice) == Object3D:
+            object_center = choice.bbox.center
+            object_center = self.normal2voxel(object_center)[:2]
+            object_center = np.asarray(object_center)
+
+            target_point = object_center
+            # # set the object center as the navigation target
+            # target_navigable_point = get_nearest_true_point(target_point, unoccupied)  # get the nearest unoccupied point for the nav target
+            # since it's not proper to directly go to the target point,
+            # we'd better find a navigable point that is certain distance from it to better observe the target
+            if not random_position:
+                # 在给定点 (target_point) 周围找到一个合适的观察点(target_navigable_point), 要求该点位于空闲区域, 不靠墙, 并且距离大约为 dist(0.75m)
+                # the target navigation point is deterministic
+                target_navigable_point = get_proper_observe_point(
+                    target_point,
+                    self.unoccupied,
+                    cur_point=cur_point,
+                    dist=cfg.final_observe_distance / self._voxel_size,
+                )
+            else:
+                # 给定一个目标点, 找一个 随机的合法合适的观测点, 并且确保目标点和观察点之间没有障碍物
+                # [min_dist, max_dist]: 限制观测点和目标点的距离范围 (0.75~1.25)
+                target_navigable_point = get_random_observe_point(
+                    target_point,
+                    self.unoccupied,
+                    min_dist=cfg.final_observe_distance / self._voxel_size,
+                    max_dist=(cfg.final_observe_distance + 1.5) / self._voxel_size,
+                )
+
+            # 如果没找到合适的位置, 由于目标物体太远, 位于未探索区域, 所以占据地图里不是未占据状态
+            if target_navigable_point is None:
+                # 基于 Habitat 的导航器 pathfinder, 在目标点附近(半径1m内)找到一个可行走的, 且高度与机器人当前位置高度相差0.1m以内的点
+                # this is usually because the target object is too far, so its surroundings are not detected as unoccupied
+                # so we just temporarily use pathfinder to find a navigable point around it
+                target_point_normal = (
+                    target_point * self._voxel_size + self._vol_origin[:2]
+                )
+                target_point_normal = np.append(target_point_normal, pts[-1])
+                target_point_habitat = pos_normal_to_habitat(target_point_normal)
+
+                target_navigable_point_habitat = (
+                    get_proper_observe_point_with_pathfinder(
+                        target_point_habitat, pathfinder, height=pts[-1]
+                    )
+                )
+                if target_navigable_point_habitat is None:
+                    logging.error(
+                        f"Error in set_next_navigation_point: cannot find a proper navigable point around the target object"
+                    )
+                    return False
+
+                target_navigable_point = self.habitat2voxel(
+                    target_navigable_point_habitat
+                )[:2]
+            self.target_point = target_navigable_point
+            return True
         # 如果选择的目标是 snapshot
-        if type(choice) == Keyframe:
+        elif type(choice) == Keyframe:
             # 把snapshot包含的物体的中心坐标转为voxel空间下坐标, 并去重
             obj_centers = [scene.objects_3d[obj_id].bbox.center for obj_id in choice.objects_3d]
             obj_centers = [self.normal2voxel(center)[:2] for center in obj_centers]
@@ -860,6 +917,11 @@ class TSDFPlanner(TSDFPlannerBase):
                 direction = (
                     self.target_point - cur_point[:2]
                 )  # if the target is a frontier, then the agent should face the target point
+            elif type(self.max_point) == Object3D:
+                object_center = self.max_point.bbox.center
+                object_center = self.normal2voxel(object_center)[:2]
+                object_center = np.asarray(object_center)
+                direction = (object_center - cur_point[:2])
             else:
                 direction = (
                     self.max_point.position - cur_point[:2]
