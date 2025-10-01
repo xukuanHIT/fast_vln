@@ -24,9 +24,8 @@ from geom import get_cam_intr, get_scene_bnds
 from utils import get_pts_angle_aeqa
 from habitat_data import HabitatData, pose_habitat_to_tsdf, pos_habitat_to_normal
 from map import Map
-from map_elements import Keyframe
+from map_elements import Keyframe, Object3D
 from tsdf_planner import TSDFPlanner, Frontier, SnapShot
-from query_vlm_aeqa import query_vlm_for_response
 from logger import Logger
 from visualization import Visualization, concat_images_opencv
 from vlm import VLM
@@ -34,9 +33,6 @@ from vlm import VLM
 
 def main(cfg, start_ratio=0.0, end_ratio=1.0):
     # load the default concept graph config
-    cfg_cg = OmegaConf.load(cfg.concept_graph_config_path)
-    OmegaConf.resolve(cfg_cg)
-
     img_height = cfg.img_height
     img_width = cfg.img_width
     cam_intr = get_cam_intr(cfg.hfov, img_height, img_width)
@@ -66,11 +62,11 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0):
         voxel_size=cfg.tsdf_grid_size,
     )
 
-    scene_map = Map(cfg, cfg_cg)
+    scene_map = Map(cfg)
     vlm_model = VLM(cfg)
     vis = Visualization(cfg=cfg)
 
-    questions_list = questions_list[2:3]
+    questions_list = questions_list[6:7]
 
     # Run all questions
     for question_idx, question_data in enumerate(questions_list):
@@ -79,6 +75,27 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0):
 
         question = question_data["question"]
         answer = question_data["answer"]
+
+        print("Task: {}".format(question))
+        qa_text_lines = ["Question: {}".format(question)]
+        vis.update_chat(qa_text_lines)
+
+        scene_map.update_task(question)
+
+        target_vl_response = vlm_model.parse_target_objects(question, scene_map.get_class_list())
+        class_to_add = []
+        if target_vl_response is not None:
+            class_to_add = scene_map.add_target_class(*target_vl_response)
+        else:
+            scene_map.set_target_object_with_clip(question)
+        parsing_target_lines = scene_map.target_manager.print_information()
+        if len(class_to_add) > 0:
+            parsing_target_lines += f"Add new classes to detector: {class_to_add}"
+
+        qa_text_lines.append(parsing_target_lines)
+        vis.update_chat(qa_text_lines)
+
+
         pts, angle = get_pts_angle_aeqa(
             question_data["position"], question_data["rotation"]
         )
@@ -106,15 +123,11 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0):
         )
         vlm_model.update_save_dir(eps_chosen_snapshot_dir)
 
-
         # run steps
-        task_success = False
         cnt_step = -1
         frame_index = 1
-
-        gpt_answer = None
-        qa_text_lines = ["Question: {}".format(question)]
-        vis.update_chat(qa_text_lines)
+        found_target_objects = []
+        task_success = False
         while cnt_step < cfg.num_step - 1:
             step_start_time = time.perf_counter()
             cnt_step += 1
@@ -177,6 +190,8 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0):
                     plt.imsave(os.path.join(eps_snapshot_dir, obs_file_name), rgb)
 
 
+            scene_map.print_map_object_labels()
+
             # 更新 frontier
             # (3) Update the Frontier Snapshots
             update_success, grid_map_vis = tsdf_planner.update_frontier_map(
@@ -218,32 +233,14 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0):
             vis.update_image(vis_image_show)
 
 
+            need_new_target_point = tsdf_planner.max_point is None and tsdf_planner.target_point is None
+            detect_new_target_class = len(scene_map.target_manager.valid_target_object_ids()) > 0 and not isinstance(tsdf_planner.max_point, Object3D)
+            if need_new_target_point or detect_new_target_class:
+                print("start reasoning..........")
 
-            # (4) Choose the next navigation point by querying the VLM
-            if cfg.choose_every_step:
-                # if we choose to query vlm every step, we clear the target point every step
-                if (
-                    tsdf_planner.max_point is not None
-                    and type(tsdf_planner.max_point) == Frontier
-                ):
-                    # reset target point to allow the model to choose again
-                    tsdf_planner.max_point = None
-                    tsdf_planner.target_point = None
-
-            
-            #  使用 ChatGPT 推理下一步 goal
-            if tsdf_planner.max_point is None and tsdf_planner.target_point is None:
-                # query the VLM for the next navigation point, and the reason for the choice
-                # vlm_response = query_vlm_for_response(
-                #     question=question,
-                #     scene=scene_map,
-                #     tsdf_planner=tsdf_planner,
-                #     cfg=cfg,
-                #     verbose=False,
-                # )
 
                 vlm_model.update_step(cnt_step)
-                vlm_response = vlm_model.query_vlm_for_response(
+                task_success, max_point_choice, choice_image, reason = vlm_model.query_vlm_for_response(
                     question=question,
                     scene=scene_map,
                     tsdf_planner=tsdf_planner,
@@ -251,39 +248,33 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0):
                     verbose=False,
                 )
 
-                if vlm_response is None:
-                    logging.info(
-                        f"Question id {question_id} invalid: query_vlm_for_response failed!"
-                    )
-                    break
 
-                # 如果目标是snapshot, 则返回的max_point_choice是snapshot(是SnapShot类实例), 
-                # 如果目标是frontier, 则返回的max_point_choice是frontier(是Frontier类实例)
-                # gpt_answer是ChatGPT给出的reason, n_filtered_snapshots是prefiltering后剩余的snapshot的数量
-                max_point_choice, gpt_answer = vlm_response
-
-                vis_text_a = "Step {}: {}".format(cnt_step, gpt_answer)
+                vis_text_a = "Step {}: {}".format(cnt_step, reason)
                 qa_text_lines.append(vis_text_a)
                 vis.update_chat(qa_text_lines)
 
 
-                # 根据ChatGPT挑选的目标, 来选择可以导航的目标点, 设置self.max_point(被选择的snaphhot或者frontier) 和 self.target_point(在habitat下具体的目标点)
-                # 如果被选择的目标是个snapshot, 则先会对这个snapshot包含的物体的物体中心求一个均值, 再在这个物体中心均值附近搜索合适的导航点(未被占据, 与观测点连通, 不靠墙)
-                # 如果被选择的目标是个frontier, 则会在frontier的位置搜索合适的导航点(在2D边界内, 不是被占据的, 在被选中的岛屿内)
-                # set the vlm choice as the navigation target
-                update_success = tsdf_planner.set_next_navigation_point(
-                    choice=max_point_choice, # 目标点
-                    pts=pts,  # 当前位置
-                    scene=scene_map, # 地图中的object
-                    cfg=cfg.planner,
-                    pathfinder=data_generator.pathfinder,
-                    random_position=False,
-                )
-                if not update_success:
-                    logging.info(
-                        f"Question id {question_id} invalid: set_next_navigation_point failed!"
+                if need_new_target_point or isinstance(max_point_choice, Object3D):
+                    tsdf_planner.max_point = None
+                    tsdf_planner.target_point = None
+
+                    # 根据ChatGPT挑选的目标, 来选择可以导航的目标点, 设置self.max_point(被选择的snaphhot或者frontier) 和 self.target_point(在habitat下具体的目标点)
+                    # 如果被选择的目标是个snapshot, 则先会对这个snapshot包含的物体的物体中心求一个均值, 再在这个物体中心均值附近搜索合适的导航点(未被占据, 与观测点连通, 不靠墙)
+                    # 如果被选择的目标是个frontier, 则会在frontier的位置搜索合适的导航点(在2D边界内, 不是被占据的, 在被选中的岛屿内)
+                    # set the vlm choice as the navigation target
+                    update_success = tsdf_planner.set_next_navigation_point(
+                        choice=max_point_choice, # 目标点
+                        pts=pts,  # 当前位置
+                        scene=scene_map, # 地图中的object
+                        cfg=cfg.planner,
+                        pathfinder=data_generator.pathfinder,
+                        random_position=False,
                     )
-                    break
+                    if not update_success:
+                        logging.info(
+                            f"Question id {question_id} invalid: set_next_navigation_point failed!"
+                        )
+                        break
 
             # 根据所选的目标位置, 前进一步, 前进的距离不超过 max_dist_from_cur (配置文件为1m)
             # (5) Agent navigate to the target point for one step
@@ -307,10 +298,9 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0):
 
 
             # (6) Check if the agent has arrived at the target to finish the question
-            if type(max_point_choice) == Keyframe and target_arrived:
+            if task_success and target_arrived:
                 # when the target is a snapshot, and the agent arrives at the target
                 # we consider the question is finished and save the chosen target snapshot
-                task_success = True
                 logging.info(
                     f"Question id {question_id} finished after arriving at target!"
                 )

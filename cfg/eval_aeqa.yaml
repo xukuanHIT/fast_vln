@@ -6,7 +6,6 @@ scene_dataset_config_path: "data/hm3d_annotated_basis.scene_dataset_config.json"
 scene_data_path: "/home/cartin5090/project/vlfm/vlfm/data/scene_datasets/hm3d"
 questions_list_path: 'data/aeqa_questions-41.json'
 
-concept_graph_config_path: "cfg/concept_graph.yaml"
 
 # major settings
 choose_every_step: false  # whether to query vlm at each step, or only after arriving at the navigation target
@@ -35,8 +34,8 @@ hfov: 120
 save_visualization: true
 
 # the image size for prompting gpt-4o
-prompt_h: 360
-prompt_w: 360
+prompt_h: 512
+prompt_w: 512
 
 # navigation
 num_step: 50
@@ -81,7 +80,7 @@ bg_classes: ['wall', 'floor', 'ceiling', 'carpet', 'door', 'rug', 'bath mat']
 skip_bg: True
 
 object_detection_min_area_ratio: 0.0001
-object_detection_confidence_threshold: 0.1
+object_detection_confidence_threshold: 0.2
 object_detection_iou_threshold: 0.9
 
 mask_area_threshold: 25
@@ -100,3 +99,4 @@ dbscan_min_points: 10
 
 
 phys_bias: 0.0
+sim_threshold: 1.2

@@ -12,6 +12,7 @@ from scipy.spatial.transform import Rotation as R
 from collections import Counter
 import time
 import math
+from PIL import Image
 
 import open_clip
 from ultralytics import SAM, YOLOWorld
@@ -20,10 +21,12 @@ from utils import resize_image
 from hierarchy_clustering import SceneHierarchicalClustering
 
 from map_elements import (
+    FrameDetections,
     Frame,
     Keyframe,
     Object3D,
     ObjectClasses,
+    TargetManager,
 )
 
 from map_utils import (
@@ -48,19 +51,17 @@ class Map:
     def __init__(
         self,
         cfg,
-        graph_cfg,
     ):
         self.cfg = cfg
         # concept graph configuration
-        self.cfg_cg = graph_cfg
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # load object classes
         # maintain a list of object classes
         self.obj_classes = ObjectClasses(
             classes_file_path="",
-            bg_classes=self.cfg_cg["bg_classes"],
-            skip_bg=self.cfg_cg["skip_bg"],
+            bg_classes=self.cfg["bg_classes"],
+            skip_bg=self.cfg["skip_bg"],
             class_set=self.cfg["class_set"],
         )
 
@@ -91,6 +92,9 @@ class Map:
         self.clip_tokenizer = open_clip.get_tokenizer("ViT-B-32")
         logging.info(f"Load CLIP model successful!")
 
+
+        self.target_manager = TargetManager()
+
         self.last_update_observation = None # pose, rgb, depth, detection results
         self.update_num = 0
 
@@ -102,6 +106,127 @@ class Map:
 
     def clear_frames(self):
         self.frames.clear()
+
+
+
+    def encode_image_with_clip(self, image_list):
+        if len(image_list) == 0:
+            return None
+        
+        images = image_list
+        if isinstance(images[0], np.ndarray):
+            images = [Image.fromarray(image) for image in images]
+        images = [self.clip_preprocess(image).unsqueeze(0) for image in images]  # 预处理
+        images = torch.cat(images).to(self.device)  # (N, 3, H, W)
+
+        with torch.no_grad(), torch.amp.autocast("cuda"):
+            image_features = self.clip_model.encode_image(images)  # (N, D)
+            image_features /= image_features.norm(dim=-1, keepdim=True)  # 归一化
+
+            return image_features.cpu().numpy()
+
+
+    def encode_text_with_clip(self, text_list):
+        with torch.no_grad(), torch.amp.autocast("cuda"):
+            text_tokens = self.clip_tokenizer(text_list).to(self.device)
+            text_feat = self.clip_model.encode_text(text_tokens)
+            text_feat /= text_feat.norm(dim=-1, keepdim=True)
+
+            return text_feat.cpu().numpy()
+        
+
+    def get_class_list(self):
+        return self.obj_classes.get_classes_arr()
+
+    def update_task(self, task):
+        task_clip_ft = self.encode_text_with_clip([task])
+        self.target_manager.task_clip_ft = task_clip_ft[0]
+
+
+    def add_target_class(
+            self,
+            new_target_class_set,
+            target_class_set,
+            add_target_reason,
+            relevant_class_set,
+            add_relevant_reason,
+            update_extrat_class = False,
+        ):
+        class_to_add = []
+        existing_class_lables = self.obj_classes.get_classes_arr()
+        existing_class_lables = set(existing_class_lables)
+        for new_target_class in new_target_class_set:
+            if new_target_class not in existing_class_lables:
+                class_to_add.append(new_target_class)
+                existing_class_lables.add(new_target_class)
+
+
+        if update_extrat_class:
+            self.obj_classes.update_extra_classes(class_to_add)
+        else:
+            self.obj_classes.add_extra_classes(class_to_add)
+
+        self.detection_model.set_classes(self.obj_classes.get_classes_arr())
+
+        self.target_manager.target_class_set = target_class_set
+        self.target_manager.relevant_class_set = relevant_class_set
+
+        self.target_manager.reason_of_selecting_target = add_target_reason
+        self.target_manager.reason_of_selecting_relevant = add_relevant_reason
+
+        return class_to_add
+
+
+    def set_target_object_with_clip(self, question):
+        with torch.no_grad():
+            object_list = self.obj_classes.get_classes_arr()
+            object_feats = self.encode_text_with_clip(object_list)
+            similarities = (self.target_manager.task_clip_ft @ object_feats.T)  # [num_objects]
+
+            threshold = similarities.max().item() * 0.95
+
+            # above_threshold_indices = (similarities >= threshold).nonzero(as_tuple=True)[0]
+            above_threshold_indices = (similarities >= threshold).nonzero()[0]
+            filtered_objects = [(object_list[i], similarities[i].item()) for i in above_threshold_indices]
+
+            # 按相似度降序排序
+            filtered_objects.sort(key=lambda x: x[1], reverse=True)
+
+            # 保留 top_k
+            top_objects = [filtered_object[0] for filtered_object in filtered_objects[:5]]
+
+            self.target_manager.target_class_set = set(top_objects)
+            # self.target_manager.relevant_class_set = set(top_objects)
+
+            self.target_manager.reason_of_selecting_target = "VLM does not give prior information for this task. Select relevant objects using CLIP."
+
+            return top_objects
+        
+
+    def find_target(self):
+        target_object_ids = self.target_manager.get_all_target_objects()
+        relevant_object_ids = self.target_manager.get_all_relevant_object()
+
+        target_objects = [self.objects_3d[object_id] for object_id in target_object_ids]
+        relevant_objects = [self.objects_3d[object_id] for object_id in relevant_object_ids]
+
+        target_keyframe_ids, relevant_keyframe_ids = set(), set()
+        for target_object in target_objects:
+            target_keyframe_ids.update(target_object.observers) 
+
+        for relevant_object in relevant_objects:
+            relevant_keyframe_ids.update(relevant_object.observers) 
+
+        target_keyframe_ids = target_keyframe_ids - self.target_manager.keyframe_blacklist
+        relevant_keyframe_ids = relevant_keyframe_ids - self.target_manager.keyframe_blacklist
+
+        target_keyframes = [self.keyframes[kf_id] for kf_id in target_keyframe_ids]
+        relevant_keyframes = [self.keyframes[kf_id] for kf_id in relevant_keyframe_ids]
+
+
+        return  target_objects, relevant_objects, target_keyframes, relevant_keyframes
+
+
 
     def print_keyframe_objects(self):
         print("================== keyframes ====================")
@@ -116,6 +241,11 @@ class Map:
         print("================== end ====================")
 
 
+    def print_map_object_labels(self):
+        class_lables = [object_3d.get_class_label() for _, object_3d in self.objects_3d.items()] 
+        class_lables = set(class_lables)
+        print("classes in map: {}".format(class_lables))
+
     def delete_keyframe(self, frame_id):
         if frame_id not in self.keyframes:
             return 
@@ -123,6 +253,8 @@ class Map:
         object_ids = self.keyframes[frame_id].objects_3d
         for object_id in object_ids:
             self.objects_3d[object_id].observers.discard(frame_id)
+
+        self.target_manager.delete_keyframe(self.keyframes[frame_id])
 
         self.keyframes.pop(frame_id)
         return
@@ -193,12 +325,12 @@ class Map:
                 # merge detected object into existing object
                 self.objects_3d[existing_obj_match_id].merge(
                     other=new_objects[detected_obj_id],
-                    downsample_voxel_size=self.cfg_cg["downsample_voxel_size"],
-                    dbscan_remove_noise=self.cfg_cg["dbscan_remove_noise"],
-                    dbscan_eps=self.cfg_cg["dbscan_eps"],
-                    dbscan_min_points=self.cfg_cg["dbscan_min_points"],
+                    downsample_voxel_size=self.cfg["downsample_voxel_size"],
+                    dbscan_remove_noise=self.cfg["dbscan_remove_noise"],
+                    dbscan_eps=self.cfg["dbscan_eps"],
+                    dbscan_min_points=self.cfg["dbscan_min_points"],
                     run_dbscan=False,
-                    spatial_sim_type=self.cfg_cg["spatial_sim_type"],
+                    spatial_sim_type=self.cfg["spatial_sim_type"],
                     obj_classes=obj_classes
                 )
 
@@ -252,7 +384,7 @@ class Map:
         img_path,
         frame_idx,
         visualization=False,
-    ) -> Tuple[np.ndarray, List[int], Optional[int]]:
+    ):
         # return annotated image; the detected object ids in current frame; the object id of the target object (if detected)
 
         # set up object_classes first
@@ -274,8 +406,18 @@ class Map:
 
         time1 = time.perf_counter()
 
+        detection_label_set = set(detection_class_labels)
+        frame_detections = FrameDetections(confidences=confidences, bbox=xyxy_np, class_labels=detection_class_labels, class_label_set=detection_label_set)
+        processed_rgb = None
+        if len(xyxy_np) > 0:
+            cam_hov = 2 * math.atan(float(image_rgb.shape[1])/intrinsics[0, 0])
+            processed_rgb = resize_image(image_rgb, self.cfg.prompt_h, self.cfg.prompt_w)
+            frame = Frame(frame_id=frame_idx, hov=cam_hov, image=processed_rgb, image_path=img_path, pose=cam_pos, detections=frame_detections)
+            self.frames[frame_idx] = frame
 
-        print("detection_class_labels = {}".format(detection_class_labels))
+
+
+        # print("detection_class_labels = {}".format(detection_class_labels))
 
         filtered_xyxy, filtered_confidences, filtered_class_ids, filtered_class_labels = filter_detections(
             image=image_rgb,
@@ -285,22 +427,17 @@ class Map:
             class_labels=detection_class_labels,
             confidence_threshold=self.cfg.object_detection_confidence_threshold,
             min_area_ratio=self.cfg.object_detection_min_area_ratio,
+            target_claasses=self.target_manager.target_class_set,
             skip_bg=self.cfg.skip_bg,
             BG_CLASSES=obj_classes.get_bg_classes_arr(),
         )
 
-        print("filtered_class_labels = {}".format(filtered_class_labels))
+        # print("filtered_class_labels = {}".format(filtered_class_labels))
+
+        # 可以不用专门跟踪物体。标记带object物体的keyframe和frontier image即可。keyframe也保存检测结果。再据此选择移动方向和喂给VLM
 
 
         time1_5 = time.perf_counter()
-
-        processed_rgb = None
-        if len(filtered_xyxy) > 0:
-            cam_hov = 2 * math.atan(float(image_rgb.shape[1])/intrinsics[0, 0])
-            processed_rgb = resize_image(image_rgb, self.cfg.prompt_h, self.cfg.prompt_w)
-            frame = Frame(frame_id=frame_idx, hov=cam_hov, image=processed_rgb, image_path=img_path, pose=cam_pos, class_ids=set(filtered_class_ids))
-            self.frames[frame_idx] = frame
-
 
         # 可视化
         # create a Detection object for visualization
@@ -429,14 +566,14 @@ class Map:
                 # 降采样和去噪
                 obj["pcd"] = init_process_pcd(
                     pcd=obj["pcd"],
-                    downsample_voxel_size=self.cfg_cg["downsample_voxel_size"],
-                    dbscan_remove_noise=self.cfg_cg["dbscan_remove_noise"],
-                    dbscan_eps=self.cfg_cg["dbscan_eps"],
-                    dbscan_min_points=self.cfg_cg["dbscan_min_points"],
+                    downsample_voxel_size=self.cfg["downsample_voxel_size"],
+                    dbscan_remove_noise=self.cfg["dbscan_remove_noise"],
+                    dbscan_eps=self.cfg["dbscan_eps"],
+                    dbscan_min_points=self.cfg["dbscan_min_points"],
                 )
                 # 更新bbox,是3D的紧致包围框
                 obj["bbox"] = get_bounding_box(
-                    spatial_sim_type=self.cfg_cg["spatial_sim_type"],
+                    spatial_sim_type=self.cfg["spatial_sim_type"],
                     pcd=obj["pcd"],
                 )
         # all()是有1个false就返回false
@@ -484,8 +621,9 @@ class Map:
             curr_class_name = gobs["classes"][curr_class_idx]
             new_obj = Object3D(
                 object_id=new_obj_id,
-                class_name=curr_class_name,
-                class_id=[curr_class_idx],
+                # class_name=curr_class_name,
+                # class_id=[curr_class_idx],
+                class_labels = [curr_class_name],
                 confidence=[gobs["confidence"][mask_idx]],
                 pcd=gobs["pcd"][mask_idx],
                 bbox=gobs["bbox"][mask_idx],
@@ -536,7 +674,7 @@ class Map:
             # Perform matching of detections to existing objects
             match_indices = match_detections_to_objects(
                 agg_sim=agg_sim,
-                detection_threshold=self.cfg_cg["sim_threshold"],
+                detection_threshold=self.cfg["sim_threshold"],
                 existing_obj_ids=list(self.objects_3d.keys()),
                 detected_obj_ids=list(new_objects.keys()),
             )
@@ -558,10 +696,14 @@ class Map:
 
         time10 = time.perf_counter()
 
+        for object_id in frame_object_ids:
+            self.target_manager.add_object(self.objects_3d[object_id])
+
         # construct keyframe
         cam_hov = 2 * math.atan(float(image_rgb.shape[1])/intrinsics[0, 0])
-        curr_keyframe = Keyframe(frame_id=frame_idx, hov=cam_hov, image=processed_rgb, image_path=img_path, pose=cam_pos, objects_3d=frame_object_ids)
+        curr_keyframe = Keyframe(frame_id=frame_idx, hov=cam_hov, image=processed_rgb, image_path=img_path, detections=frame_detections, pose=cam_pos, objects_3d=frame_object_ids)
         self.keyframes[frame_idx] = curr_keyframe
+        self.target_manager.add_keyframe(curr_keyframe)
 
         self.last_update_observation = [cam_pos[:3, 3], R.from_matrix(cam_pos[:3, :3]), save_filtered_class_ids]
         self.update_num += 1
