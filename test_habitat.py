@@ -20,15 +20,16 @@ import matplotlib.pyplot as plt
 import cv2
 from scipy.spatial.transform import Rotation as R
 
-from geom import get_cam_intr, get_scene_bnds
-from utils import get_pts_angle_aeqa
-from habitat_data import HabitatData, pose_habitat_to_tsdf, pos_habitat_to_normal
-from map import Map
-from map_elements import Keyframe, Object3D
-from tsdf_planner import TSDFPlanner, Frontier, SnapShot
-from logger import Logger
-from visualization import Visualization, concat_images_opencv
-from vlm import VLM
+from planner.geom import get_cam_intr
+from habitat.habitat_data import HabitatData, pose_habitat_to_tsdf, pos_habitat_to_normal, get_scene_bnds, get_pts_angle_aeqa
+from map.map import Map
+from map.map_elements import Keyframe, Object3D
+from planner.tsdf_planner import TSDFPlanner, Frontier
+from vlm.vlm import VLM
+from habitat.policy import Policy
+
+from utils.logger import Logger
+from utils.visualization import Visualization, concat_images_opencv
 
 
 def main(cfg, start_ratio=0.0, end_ratio=1.0):
@@ -66,7 +67,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0):
     vlm_model = VLM(cfg)
     vis = Visualization(cfg=cfg)
 
-    questions_list = questions_list[6:7]
+    questions_list = questions_list[7:8]
 
     # Run all questions
     for question_idx, question_data in enumerate(questions_list):
@@ -109,16 +110,18 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0):
                 voxel_size=cfg.tsdf_grid_size,
                 floor_height=pts[1],
                 floor_height_offset=0,
-                pts_init=pts,  # 机器人初始位置
+                pts_init=pos_habitat_to_normal(pts),  # 机器人初始位置
                 init_clearance=cfg.init_clearance * 2,
                 save_visualization=cfg.save_visualization,
             )
+        
+        policy = Policy()
 
 
         episode_dir, eps_chosen_snapshot_dir, eps_frontier_dir, eps_snapshot_dir = (
             logger.init_episode(
                 question_id=question_id,
-                init_pts_voxel=tsdf_planner.habitat2voxel(pts)[:2],  # 3D点转为voxel坐标系下位姿
+                init_pts_voxel=tsdf_planner.normal2voxel(pos_habitat_to_normal(pts))[:2],  # 3D点转为voxel坐标系下位姿
             )
         )
         vlm_model.update_save_dir(eps_chosen_snapshot_dir)
@@ -195,7 +198,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0):
             # 更新 frontier
             # (3) Update the Frontier Snapshots
             update_success, grid_map_vis = tsdf_planner.update_frontier_map(
-                pts=pts,
+                pts=pos_habitat_to_normal(pts),
                 cfg=cfg.planner,
                 scene=scene_map,
                 cnt_step=cnt_step,  # step的index
@@ -233,11 +236,10 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0):
             vis.update_image(vis_image_show)
 
 
-            need_new_target_point = tsdf_planner.max_point is None and tsdf_planner.target_point is None
-            detect_new_target_class = len(scene_map.target_manager.valid_target_object_ids()) > 0 and not isinstance(tsdf_planner.max_point, Object3D)
+            need_new_target_point = policy.max_point is None and policy.target_point is None
+            detect_new_target_class = len(scene_map.target_manager.valid_target_object_ids()) > 0 and not isinstance(policy.max_point, Object3D)
             if need_new_target_point or detect_new_target_class:
                 print("start reasoning..........")
-
 
                 vlm_model.update_step(cnt_step)
                 task_success, max_point_choice, choice_image, reason = vlm_model.query_vlm_for_response(
@@ -248,24 +250,24 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0):
                     verbose=False,
                 )
 
-
                 vis_text_a = "Step {}: {}".format(cnt_step, reason)
                 qa_text_lines.append(vis_text_a)
                 vis.update_chat(qa_text_lines)
 
 
                 if need_new_target_point or isinstance(max_point_choice, Object3D):
-                    tsdf_planner.max_point = None
-                    tsdf_planner.target_point = None
+                    policy.max_point = None
+                    policy.target_point = None
 
                     # 根据ChatGPT挑选的目标, 来选择可以导航的目标点, 设置self.max_point(被选择的snaphhot或者frontier) 和 self.target_point(在habitat下具体的目标点)
                     # 如果被选择的目标是个snapshot, 则先会对这个snapshot包含的物体的物体中心求一个均值, 再在这个物体中心均值附近搜索合适的导航点(未被占据, 与观测点连通, 不靠墙)
                     # 如果被选择的目标是个frontier, 则会在frontier的位置搜索合适的导航点(在2D边界内, 不是被占据的, 在被选中的岛屿内)
                     # set the vlm choice as the navigation target
-                    update_success = tsdf_planner.set_next_navigation_point(
+                    update_success = policy.set_next_navigation_point(
                         choice=max_point_choice, # 目标点
                         pts=pts,  # 当前位置
                         scene=scene_map, # 地图中的object
+                        planner=tsdf_planner,
                         cfg=cfg.planner,
                         pathfinder=data_generator.pathfinder,
                         random_position=False,
@@ -278,9 +280,10 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0):
 
             # 根据所选的目标位置, 前进一步, 前进的距离不超过 max_dist_from_cur (配置文件为1m)
             # (5) Agent navigate to the target point for one step
-            return_values = tsdf_planner.agent_step(
+            return_values = policy.agent_step(
                 pts=pts,        # 机器人当前位置
                 angle=angle,    # 机器人当前旋转
+                planner=tsdf_planner,
                 pathfinder=data_generator.pathfinder,
                 cfg=cfg.planner,
                 path_points=None,

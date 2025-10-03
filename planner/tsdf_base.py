@@ -28,10 +28,9 @@
 
 import numpy as np
 from numba import njit, prange
-from geom import *
-from habitat_data import pos_normal_to_habitat, pos_habitat_to_normal
-import habitat_sim
 from typing import List
+
+from .geom import points_in_circle, rigid_transform
 
 
 class TSDFPlannerBase:
@@ -118,7 +117,7 @@ class TSDFPlannerBase:
 
         # 初始位置及其邻域的一些点
         # For masking the area around initial pose to be unoccupied
-        coords_init = self.habitat2voxel(pts_init)
+        coords_init = self.normal2voxel(pts_init)
         self.init_points = points_in_circle(
             coords_init[0],
             coords_init[1],
@@ -150,6 +149,12 @@ class TSDFPlannerBase:
             pix[i, 0] = int(np.round((cam_pts[i, 0] * fx / cam_pts[i, 2]) + cx))
             pix[i, 1] = int(np.round((cam_pts[i, 1] * fy / cam_pts[i, 2]) + cy))
         return pix
+
+    def voxel_size(self):
+        return self._voxel_size
+    
+    def vol_origin(self):
+        return self._vol_origin
 
     def pix2cam(self, pix, intr):
         """Convert pixel coordinates to camera coordinates."""
@@ -315,58 +320,6 @@ class TSDFPlannerBase:
             & (array[:, 1] < self._vol_dim[1])
         ]
 
-    def get_closest_distance(
-        self,
-        path_points: List[np.ndarray],
-        point: np.ndarray,
-        normal: np.ndarray,
-        pathfinder,
-        height,
-    ):
-        # get the closest distance for each segment in the path curve
-        # use pathfinder's distance instead of the euclidean distance
-        dist = np.inf
-        cos = None
-
-        # calculate the pathfinder distance in advance for each point in the path to reduce redundancy
-        dist_list = [
-            self.get_distance(point, endpoint, height, pathfinder, input_voxel=False)[0]
-            for endpoint in path_points
-        ]
-
-        for i in range(len(path_points) - 1):
-            p1, p2 = path_points[i], path_points[i + 1]
-            seg = p2 - p1
-            # if the point is between the two points
-            if np.dot(point - p1, seg) * np.dot(point - p2, seg) <= 0:
-                # get the projection of point onto the line
-                t = np.dot(point - p1, seg) / np.dot(seg, seg)
-                proj_point = p1 + t * seg
-                d = self.get_distance(
-                    point, proj_point, height, pathfinder, input_voxel=False
-                )[0]
-            # else, get the distance to the closest endpoint
-            else:
-                d = min(dist_list[i], dist_list[i + 1])
-
-            # if the distance is smaller for current edge, update
-            if d < dist:
-                dist = d
-                cos = np.dot(seg, normal) / (
-                    np.linalg.norm(seg) * np.linalg.norm(normal)
-                )
-            # if the distance is the same, update the cos value if the angle is smaller
-            # this usually happens when two connected lines share the same nearest endpoint of that point
-            if (
-                d == dist
-                and np.dot(seg, normal) / (np.linalg.norm(seg) * np.linalg.norm(normal))
-                < cos
-            ):
-                cos = np.dot(seg, normal) / (
-                    np.linalg.norm(seg) * np.linalg.norm(normal)
-                )
-
-        return dist, cos
 
     @staticmethod
     def update_path_points(path_points: List[np.ndarray], point: np.ndarray):
@@ -408,79 +361,11 @@ class TSDFPlannerBase:
     def rad2vector(angle):
         return np.array([-np.sin(angle), np.cos(angle)])
 
-    def get_distance(self, p1, p2, height, pathfinder, input_voxel=True):
-        '''
-        计算两个点之间的距离, 优先使用 Habitat 的导航路径距离(geodesic distance), 如果路径不可达则退化为欧式距离
-        返回值是距离和路径点
-        '''
-        # p1, p2 are in voxel space or habitat space
-        # convert p1, p2 to habitat space if input_voxel is True
-        if input_voxel:
-            p1_world = p1 * self._voxel_size + self._vol_origin[:2]
-            p2_world = p2 * self._voxel_size + self._vol_origin[:2]
-        else:
-            p1_world = p1
-            p2_world = p2
-
-        p1_world = np.append(p1_world, height)
-        p1_habitat = pos_normal_to_habitat(p1_world)
-
-        p2_world = np.append(p2_world, height)
-        p2_habitat = pos_normal_to_habitat(p2_world)
-
-        path = habitat_sim.ShortestPath()
-        path.requested_start = p1_habitat
-        path.requested_end = p2_habitat
-        found_path = pathfinder.find_path(path)
-
-        if found_path:
-            return path.geodesic_distance, path.points
-
-        # 如果无可用路径, 则在点附近邻域找可导航的点
-        # if path not found, then try to find a path to a near point of p1 and p2
-        p1_habitat_near = get_near_navigable_point(p1_habitat, pathfinder, radius=0.2)
-        p2_habitat_near = get_near_navigable_point(p2_habitat, pathfinder, radius=0.4)
-
-        if p1_habitat_near is not None and p2_habitat_near is not None:
-            path.requested_start = p1_habitat_near
-            path.requested_end = p2_habitat_near
-            found_path = pathfinder.find_path(path)
-            if found_path:
-                return path.geodesic_distance, path.points
-
-        # if still not found, then return the euclidean distance
-        if input_voxel:
-            return np.linalg.norm(p1 - p2) * self._voxel_size, None
-        else:
-            return np.linalg.norm(p1 - p2), None
-
-    def habitat2voxel(self, pts):
-        '''
-        给定一个点的位置, 转为voxel坐标系下的坐标, 包含三步:
-            1. habitat坐标转为normal坐标: x -> x, y -> z, z -> -y
-            2. 算得相对voxel坐标系原点坐标
-            3. 用voxel大小归一化坐标
-        '''
-        # x -> x, y -> z, z -> -y
-        pts_normal = pos_habitat_to_normal(pts)
-
-        # 给定一个点的坐标, normalize称voxel坐标系下的坐标
-        # 即先算得相对voxel坐标系原点坐标, 再用voxel大小归一化坐标
-        pts_voxel = self.normal2voxel(pts_normal)
-        return pts_voxel
-
     def get_obstacle_map(self, height):
         assert self._obstacle_vol_cpu is not None
         height_voxel = int(height / self._voxel_size) + self.min_height_voxel
         return self._obstacle_vol_cpu[:, :, height_voxel]
 
-    def normal2habitat(self, pts):
-        assert len(pts) == 2, f"Expected 2D coordinate in normal space, got {pts}"
-        return pos_normal_to_habitat(np.append(pts, self.floor_height))
-
     def voxel2normal(self, pts):
         assert len(pts) == 2, f"Expected 2D coordinate in voxel space, got {pts}"
         return pts * self._voxel_size + self._vol_origin[:2]
-
-    def voxel2habitat(self, pts):
-        return self.normal2habitat(self.voxel2normal(pts))

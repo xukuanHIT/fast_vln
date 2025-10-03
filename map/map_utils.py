@@ -5,11 +5,15 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 from scipy.spatial.distance import cosine
-
-import supervision as sv
-import logging
 from typing import List, Optional, Tuple, Dict
-from map_elements import Keyframe, Object3D
+
+
+def resize_image(image, target_h, target_w):
+    # image: np.array, h, w, c
+    image = Image.fromarray(image)
+    image = image.resize((target_w, target_h))
+    return np.array(image)
+
 
 def object_id_to_color(object_id):
     np.random.seed(object_id)            # 保证同 id 颜色固定

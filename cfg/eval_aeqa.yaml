@@ -15,8 +15,8 @@ top_k_categories: 10  # keep the top k relevant categories during prefiltering
 
 # about detection model
 yolo_model_name: yolov8x-world.pt
-sam_model_name: sam_l.pt
-# sam_model_name: mobile_sam.pt
+# sam_model_name: sam_l.pt
+sam_model_name: mobile_sam.pt
 class_set: scannet200  # use the 200-class set for yolo-world detector
 
 # about snapshots clustering
@@ -76,7 +76,7 @@ scene_graph:
 
 
 # for scene-graph map
-bg_classes: ['wall', 'floor', 'ceiling', 'carpet', 'door', 'rug', 'bath mat']
+bg_classes: ['wall', 'floor', 'ceiling', 'carpet', 'rug', 'bath mat']
 skip_bg: True
 
 object_detection_min_area_ratio: 0.0001
