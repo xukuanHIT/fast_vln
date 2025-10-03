@@ -7,12 +7,11 @@ from qwen_vl_utils import process_vision_info
 from PIL import Image
 import numpy as np
 
-import logging
 from typing import Tuple, Optional, Union
 from collections import defaultdict
 
-from tsdf_planner import TSDFPlanner, SnapShot, Frontier
-from map import Map
+from planner.tsdf_planner import TSDFPlanner, Frontier
+from map.map import Map
 
 
 class VLM:
@@ -299,7 +298,7 @@ class VLM:
         tsdf_planner: TSDFPlanner,
         cfg,
         verbose: bool = False,
-    ) -> Optional[Tuple[Union[SnapShot, Frontier], str, int]]:
+    ):
         
         target_objects, relevant_objects, target_keyframes, relevant_keyframes = scene.find_target()
 

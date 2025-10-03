@@ -8,9 +8,6 @@ import matplotlib.pyplot as plt
 import matplotlib.image
 from typing import Union
 
-from tsdf_planner import TSDFPlanner, Frontier, SnapShot
-
-
 class Logger:
     def __init__(
         self,
@@ -368,49 +365,4 @@ class Logger:
         plt.savefig(os.path.join(visualization_path, "{}_map.png".format(cnt_step)))
         plt.close()
 
-    def save_frontier_visualization(
-        self,
-        cnt_step,
-        tsdf_planner: TSDFPlanner,
-        max_point_choice: Union[SnapShot, Frontier],
-        global_caption,
-    ):
-        assert self.episode_dir is not None
-        frontier_video_path = os.path.join(self.episode_dir, "frontier_video")
-        episode_frontier_dir = os.path.join(self.episode_dir, "frontier")
-        episode_snapshot_dir = os.path.join(self.episode_dir, "snapshot")
-        os.makedirs(frontier_video_path, exist_ok=True)
-        num_images = len(tsdf_planner.frontiers)
-        if type(max_point_choice) == SnapShot:
-            num_images += 1
-        side_length = int(np.sqrt(num_images)) + 1
-        side_length = max(2, side_length)
-        fig, axs = plt.subplots(side_length, side_length, figsize=(20, 20))
-        for h_idx in range(side_length):
-            for w_idx in range(side_length):
-                axs[h_idx, w_idx].axis("off")
-                i = h_idx * side_length + w_idx
-                if (i < num_images - 1) or (
-                    i < num_images and type(max_point_choice) == Frontier
-                ):
-                    img_path = os.path.join(
-                        episode_frontier_dir, tsdf_planner.frontiers[i].image
-                    )
-                    img = matplotlib.image.imread(img_path)
-                    axs[h_idx, w_idx].imshow(img)
-                    if (
-                        type(max_point_choice) == Frontier
-                        and max_point_choice.image == tsdf_planner.frontiers[i].image
-                    ):
-                        axs[h_idx, w_idx].set_title("Chosen")
-                elif i == num_images - 1 and type(max_point_choice) == SnapShot:
-                    img_path = os.path.join(
-                        episode_snapshot_dir, max_point_choice.image
-                    )
-                    img = matplotlib.image.imread(img_path)
-                    axs[h_idx, w_idx].imshow(img)
-                    axs[h_idx, w_idx].set_title("Snapshot Chosen")
-        fig.suptitle(global_caption, fontsize=16)
-        plt.tight_layout(rect=(0.0, 0.0, 1.0, 0.95))
-        plt.savefig(os.path.join(frontier_video_path, f"{cnt_step}.png"))
-        plt.close()
+

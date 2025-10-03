@@ -1,11 +1,6 @@
 import rerun as rr
 import numpy as np
-import open3d as o3d
-from PIL import Image
 import matplotlib.pyplot as plt
-import textwrap
-from PIL import Image, ImageDraw, ImageFont
-import cv2
 
 
 def concat_images_opencv(img_list, gap=10, bg_color=(255,255,255)):

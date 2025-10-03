@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from collections import Counter
 
-from pointcloud import process_pcd, get_bounding_box
+from .pointcloud import process_pcd, get_bounding_box
 
 
 @dataclass

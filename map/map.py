@@ -1,13 +1,11 @@
 import os
 import numpy as np
-import random
 import torch
 
 import supervision as sv
 import logging
 from collections import Counter
 from typing import List, Optional, Tuple, Dict, Union
-import copy
 from scipy.spatial.transform import Rotation as R
 from collections import Counter
 import time
@@ -16,11 +14,9 @@ from PIL import Image
 
 import open_clip
 from ultralytics import SAM, YOLOWorld
-from utils import resize_image
 
-from hierarchy_clustering import SceneHierarchicalClustering
-
-from map_elements import (
+from .hierarchy_clustering import SceneHierarchicalClustering
+from .map_elements import (
     FrameDetections,
     Frame,
     Keyframe,
@@ -29,7 +25,8 @@ from map_elements import (
     TargetManager,
 )
 
-from map_utils import (
+from .map_utils import (
+    resize_image,
     compute_clip_features_batched, 
     filter_detections, 
     filter_masks, 
@@ -38,7 +35,7 @@ from map_utils import (
     match_detections_to_objects, 
 )
 
-from pointcloud import (
+from .pointcloud import (
     detections_to_obj_pcd_and_bbox,
     init_process_pcd,
     get_bounding_box,
@@ -546,7 +543,6 @@ class Map:
         time6 = time.perf_counter()
 
         # 2D -> 3D
-        # obj_pcds_and_bboxes = measure_time(detections_to_obj_pcd_and_bbox)(
         obj_pcds_and_bboxes = detections_to_obj_pcd_and_bbox(
             depth_array=depth,
             masks=gobs["mask"],

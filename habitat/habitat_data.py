@@ -3,6 +3,7 @@ import numpy as np
 import logging
 import habitat_sim
 import quaternion
+from habitat_sim.utils.common import quat_to_angle_axis, quat_from_coeffs
 
 
 from habitat_sim.utils.common import (
@@ -50,6 +51,48 @@ def pose_habitat_to_tsdf(pose):
 def pose_normal_to_tsdf_real(pose):
     # This one makes sense, which is making x-forward, y-left, z-up to z-forward, x-right, y-down
     return pose @ np.array([[0, 0, 1, 0], [-1, 0, 0, 0], [0, -1, 0, 0], [0, 0, 0, 1]])
+
+
+def get_pts_angle_aeqa(init_pts, init_quat):
+    '''
+    quaternion to angle
+    '''
+    pts = np.asarray(init_pts)
+
+    init_quat = quaternion.quaternion(*init_quat)
+    angle, axis = quat_to_angle_axis(init_quat)
+
+    angle = angle * axis[1] / np.abs(axis[1])
+
+    return pts, angle
+
+
+def get_scene_bnds(pathfinder, floor_height):
+    # Get mesh boundaries - this is for the full scene
+    scene_bnds = pathfinder.get_bounds()
+    scene_lower_bnds_normal = pos_habitat_to_normal(scene_bnds[0])
+    scene_upper_bnds_normal = pos_habitat_to_normal(scene_bnds[1])
+    scene_size = np.abs(
+        np.prod(scene_upper_bnds_normal[:2] - scene_lower_bnds_normal[:2])
+    )
+    tsdf_bnds = np.array(
+        [
+            [
+                min(scene_lower_bnds_normal[0], scene_upper_bnds_normal[0]),
+                max(scene_lower_bnds_normal[0], scene_upper_bnds_normal[0]),
+            ],
+            [
+                min(scene_lower_bnds_normal[1], scene_upper_bnds_normal[1]),
+                max(scene_lower_bnds_normal[1], scene_upper_bnds_normal[1]),
+            ],
+            [
+                floor_height - 0.2,
+                floor_height + 3.5,
+            ],
+        ]
+    )
+    return tsdf_bnds, scene_size
+
 
 
 def make_semantic_cfg(settings):
